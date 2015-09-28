@@ -13,6 +13,8 @@ int run(const char *inBrat, const char *inDem, const char *outPoints, const char
 double addDegrees(double base, double addValue);
 double calcAzimuth(double startX, double startY, double endX, double endY);
 int calcCoords(double startX, double startY, double azimuth, double distance, double &newX, double &newY);
+int getRasterCol(double transform[6], double xCoord);
+int getRasterRow(double transform[6], double yCoord);
 double getRasterValueAtPoint(const char *rasterPath, double xCoord, double yCoord);
 int loadRasterValuesFromPoint(const char *rasterPath, const char *pointPath, int rows, int cols, double transform[]);
 
@@ -269,6 +271,31 @@ int calcCoords(double startX, double startY, double azimuth, double distance, do
     return 0;
 }
 
+int getRasterCol(double transform[6], double xCoord)
+{
+    int col;
+    double xOffset, xDiv;
+
+    xOffset = xCoord - transform[0];
+    xDiv = xOffset/transform[1];
+    col = floor(xDiv);
+
+    return col;
+}
+
+int getRasterRow(double transform[6], double yCoord)
+{
+    int row;
+
+    double yOffset, yDiv;
+
+    yOffset = transform[3] - yCoord;
+    yDiv = yOffset/fabs(transform[5]);
+    row = floor(yDiv);
+
+    return row;
+}
+
 double getRasterValueAtPoint(const char *rasterPath, double xCoord, double yCoord)
 {
     GDALDataset *pRaster;
@@ -319,5 +346,56 @@ int loadRasterValuesFromPoint(const char *rasterPath, const char *pointPath, int
     OGRLayer *layer = pPoints->GetLayer(0);
     int nFeatures = layer->GetFeatureCount();
     qDebug()<<"pond points"<<nFeatures;
+    QString damElevName = "dam_elev";
+    int nDamEl, nDemEl, row, col;
+    QString demElevName = "GRID_CODE";
+    QString fieldName;
+    double damElev, demElev, watDep;
 
+    OGRFeatureDefn *featDfn = layer->GetLayerDefn();
+
+    for (int i=0; i<featDfn->GetFieldCount(); i++)
+    {
+        fieldName = QString::fromUtf8(featDfn->GetFieldDefn(i)->GetNameRef());
+        if (fieldName == damElevName)
+        {
+            nDamEl = i;
+        }
+        else if (fieldName == demElevName)
+        {
+            nDemEl = i;
+        }
+    }
+    qDebug()<< "dam, dem index "<<nDamEl<<nDemEl;
+
+    OGRFeature *feature;
+
+    float *depth = (float*) CPLMalloc(sizeof(float)*1);
+
+    layer->ResetReading();
+    while((feature = layer->GetNextFeature()) != NULL)
+    {
+        damElev = feature->GetFieldAsDouble(nDamEl);
+        demElev = feature->GetFieldAsDouble(nDemEl);
+        watDep = damElev - demElev;
+
+        OGRPoint *point = (OGRPoint*) feature->GetGeometryRef();
+
+        if (watDep > 0.0)
+        {
+            col = getRasterCol(transform, point->getX());
+            row = getRasterRow(transform, point->getY());
+            *depth = watDep;
+            qDebug()<<"dam, dem, wat"<<damElev<<demElev<<watDep<<*depth;
+
+            pRaster->GetRasterBand(1)->RasterIO(GF_Write, col, row, 1, 1, depth, 1, 1, GDT_Float32, 0,0);
+        }
+    }
+
+    OGRFeature::DestroyFeature(feature);
+    OGRDataSource::DestroyDataSource(pPoints);
+
+    CPLFree(depth);
+
+    GDALClose(pRaster);
 }
