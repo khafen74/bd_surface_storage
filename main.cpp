@@ -13,6 +13,7 @@ int run(const char *inBrat, const char *inDem, const char *outPoints, const char
 double addDegrees(double base, double addValue);
 double calcAzimuth(double startX, double startY, double endX, double endY);
 int calcCoords(double startX, double startY, double azimuth, double distance, double &newX, double &newY);
+int createDamPoints(const char *bratPath, const char *pointPath);
 int getRasterCol(double transform[6], double xCoord);
 int getRasterRow(double transform[6], double yCoord);
 double getRasterValueAtPoint(const char *rasterPath, double xCoord, double yCoord);
@@ -23,7 +24,7 @@ int main(int argc, char *argv[])
     QCoreApplication a(argc, argv);
 
     const char *bratIn = "E:/etal/Projects/NonLoc/Beaver_Modeling/02_Data/BRAT/TempleFk";
-    const char *demIn = "E:/etal/Projects/NonLoc/Beaver_Modeling/02_Data/DEM/NED_10m/TempleFk_WS/templefk_10m_ws.tif";
+    const char *demIn = "E:/etal/Projects/NonLoc/Beaver_Modeling/02_Data/DEM/LiDaR_1m/fme450000.tif";
     const char *pointsOut = "E:/etal/Projects/NonLoc/Beaver_Modeling/z_crap/pondpoints.shp";
     const char *pondsOut = "E:/etal/Projects/NonLoc/Beaver_Modeling/z_crap/pondstorage.tif";
 
@@ -42,6 +43,7 @@ int run(const char *inBrat, const char *inDem, const char *outPoints, const char
     OGRRegisterAll();
     qDebug()<<"gdal registered";
 
+    const char *pondPointsOut = "E:/etal/Projects/NonLoc/Beaver_Modeling/z_crap/pondpoints";
     const char *startPointsOut = "E:/etal/Projects/NonLoc/Beaver_Modeling/z_crap/startpoints";
     const char *endPointsOut = "E:/etal/Projects/NonLoc/Beaver_Modeling/z_crap/endpoints";
     const char *polygonsOut = "E:/etal/Projects/NonLoc/Beaver_Modeling/z_crap/polygons";
@@ -56,6 +58,7 @@ int run(const char *inBrat, const char *inDem, const char *outPoints, const char
     OGRSFDriver *pDriverShp;
     OGRSFDriverRegistrar *registrar = OGRSFDriverRegistrar::GetRegistrar();
     pDriverShp = registrar->GetDriverByName("ESRI Shapefile");
+    pPondPoints = pDriverShp->CreateDataSource(pondPointsOut, NULL);
     pStartPoints = pDriverShp->CreateDataSource(startPointsOut, NULL);
     pEndPoints = pDriverShp->CreateDataSource(endPointsOut, NULL);
     pPolygons = pDriverShp->CreateDataSource(polygonsOut, NULL);
@@ -69,87 +72,127 @@ int run(const char *inBrat, const char *inDem, const char *outPoints, const char
 
     OGRLayer *pBratLayer = pBrat->GetLayer(0);
     int nFeatures = pBratLayer->GetFeatureCount();
-    OGRFeature *pBratFeature, *pStartFeature, *pEndFeature, *pPolygonFeature;
     OGRGeometry *pGeom;
 
+    pPondPoints->CreateLayer("PondPoints", pBratLayer->GetSpatialRef(), wkbPoint, NULL);
     pStartPoints->CreateLayer("BratStartPoints", pBratLayer->GetSpatialRef(), wkbPoint, NULL);
     pEndPoints->CreateLayer("BratEndPoints", pBratLayer->GetSpatialRef(), wkbPoint, NULL);
     pPolygons->CreateLayer("PondSearchPolygons", pBratLayer->GetSpatialRef(), wkbPolygon, NULL);
 
-    OGRLayer *pStartLayer, *pEndLayer, *pPolyLayer;
+    OGRLayer *pStartLayer, *pEndLayer, *pPolyLayer, *pPondLayer;
+    pPondLayer = pPondPoints->GetLayer(0);
     pStartLayer = pStartPoints->GetLayer(0);
     pEndLayer = pEndPoints->GetLayer(0);
     pPolyLayer = pPolygons->GetLayer(0);
     OGRFieldDefn field("dam_elev", OFTReal);
     pPolyLayer->CreateField(&field);
-    pStartFeature = OGRFeature::CreateFeature(pStartLayer->GetLayerDefn());
-    pEndFeature = OGRFeature::CreateFeature(pEndLayer->GetLayerDefn());
-    pPolygonFeature = OGRFeature::CreateFeature(pPolyLayer->GetLayerDefn());
     qDebug()<<"points layer(s) added";
 
     OGRPoint point1, point2;
-    int nPoints;
-    double azimuthStart, azimuthCurrent, distance, pointX, pointY;
+    int nPoints, nDamCount;
+    double azimuthStart, azimuthCurrent, distance, pointX, pointY, length, damDens, spacing, slope;
     QVector<double> xCoords(5), yCoords(5);
 
     for (int i=0; i<nFeatures; i++)
     {
-        qDebug()<<i;
+        OGRFeature *pBratFeature, *pStartFeature, *pEndFeature, *pPondFeature;
+        pPondFeature = OGRFeature::CreateFeature(pPondLayer->GetLayerDefn());
+        pStartFeature = OGRFeature::CreateFeature(pStartLayer->GetLayerDefn());
+        pEndFeature = OGRFeature::CreateFeature(pEndLayer->GetLayerDefn());
+
         pBratFeature = pBratLayer->GetFeature(i);
-        qDebug()<<"brat layer retrieved";
+
         pGeom = pBratFeature->GetGeometryRef();
         OGRLineString *pBratLine = (OGRLineString*) pGeom;
         nPoints = pBratLine->getNumPoints();
-        qDebug()<<"nPoints "<<nPoints;
-        qDebug()<<pBratLine->getX(0)<<pBratLine->getY(0);
+
         point1.setX(pBratLine->getX(0));
         point1.setY(pBratLine->getY(0));
-        qDebug()<<point1.getX()<<point1.getY();
+
         pStartFeature->SetGeometry(&point1);
-        qDebug()<<"geom set";
+
         pStartLayer->CreateFeature(pStartFeature);
         point2.setX(pBratLine->getX(nPoints-1));
         point2.setY(pBratLine->getY(nPoints-1));
         pEndFeature->SetGeometry(&point2);
         pEndLayer->CreateFeature(pEndFeature);
-        double damElevation, damHeight;
-        damElevation = getRasterValueAtPoint(inDem, point2.getX(), point2.getY());
+
+
+        const char *densName = "e_DamDens";
+        const char *slopeName = "iGeo_Slope";
+        length = pBratLine->get_Length();
+        damDens = pBratFeature->GetFieldAsDouble(densName);
+        slope = pBratFeature->GetFieldAsDouble(slopeName);
+        nDamCount = 0;
+        nDamCount = round(length * (damDens/1000.0));
+        if (nDamCount > 0)
+        {
+            spacing = length/(nDamCount*1.0);
+        }
+        else
+        {
+            spacing = 0.0;
+        }
+
+        if (damDens <= 0.0 && nDamCount > 0)
+        {
+            qDebug()<<"error: dam dens "<<damDens<<nDamCount;
+        }
+        //qDebug()<<"space, length, dens, count"<<spacing<<length<<damDens<<nDamCount;
+
+        double damElevation, damHeight, pointDist;
         damHeight = 1.0;
-        qDebug()<<damElevation<<damHeight;
-        damElevation += damHeight;
-        qDebug()<<"dam elevation = "<<damElevation;
-        pPolygonFeature->SetField("dam_elev", damElevation);
-        qDebug()<<"field set";
 
         azimuthStart = calcAzimuth(point2.getX(), point2.getY(), point1.getX(), point1.getY());
-        distance = 25.0;
-        pointX=0, pointY=0;
-        qDebug()<<"setting poly and linear ring";
-        OGRPolygon pPondPoly;
-        OGRLinearRing pRing;
-        OGRPoint pPolyPoint;
-
-        qDebug()<<"starting poly loop";
-        for (int i=0; i<5; i++)
+        distance = (damHeight/slope)*2.0;
+        if (distance > spacing)
         {
-            azimuthCurrent = addDegrees(azimuthStart, ANGLE_OFFSET[i]);
-            calcCoords(point2.getX(), point2.getY(), azimuthCurrent, distance, xCoords[i], yCoords[i]);
-            qDebug()<<"coords calced"<<xCoords[i]<<yCoords[i];
-            pPolyPoint.setX(xCoords[i]);
-            pPolyPoint.setY(yCoords[i]);
-            qDebug()<<"point created";
-            pRing.addPoint(&pPolyPoint);
-            qDebug()<<"point added";
+            distance = spacing;
         }
-        qDebug()<<"finishing loop";
-        pRing.addPoint(xCoords[0], yCoords[0]);
-        qDebug()<<"final point added";
-        pPondPoly.addRing(&pRing);
-        qDebug()<<"ring added";
-        pPolygonFeature->SetGeometry(&pPondPoly);
-        qDebug()<<"poly geom set";
-        pPolyLayer->CreateFeature(pPolygonFeature);
-        qDebug()<<"feature added";
+        pointX=0, pointY=0;
+
+        for (int j=0; j<nDamCount; j++)
+        {
+            OGRPoint damPoint;
+            OGRFeature *pPolygonFeature;
+            pPolygonFeature = OGRFeature::CreateFeature(pPolyLayer->GetLayerDefn());
+            pointDist = length - (spacing * (j * 1.0));
+            //qDebug()<<j+1<<" of "<<nDamCount<<" point dist "<<pointDist;
+            pBratLine->Value(pointDist, &damPoint);
+            //qDebug()<<"dam point retrieved";
+            damElevation = getRasterValueAtPoint(inDem, damPoint.getX(), damPoint.getY());
+            //qDebug()<<"dam elevation retrieved";
+            damElevation += damHeight;
+
+            pPolygonFeature->SetField("dam_elev", damElevation);
+            //qDebug()<<"field set"<<damElevation;
+            OGRPolygon pPondPoly;
+            OGRLinearRing pRing;
+            OGRPoint pPolyPoint;
+            //qDebug()<<"starting poly loop";
+
+            for (int k=0; k<5; k++)
+            {
+                azimuthCurrent = addDegrees(azimuthStart, ANGLE_OFFSET[k]);
+                calcCoords(damPoint.getX(), damPoint.getY(), azimuthCurrent, distance, xCoords[k], yCoords[k]);
+
+                pPolyPoint.setX(xCoords[k]);
+                pPolyPoint.setY(yCoords[k]);
+
+                pRing.addPoint(&pPolyPoint);
+            }
+
+            pRing.addPoint(xCoords[0], yCoords[0]);
+            pPondPoly.addRing(&pRing);
+            pPolygonFeature->SetGeometry(&pPondPoly);
+            pPolyLayer->CreateFeature(pPolygonFeature);
+            OGRFeature::DestroyFeature(pPolygonFeature);
+        }
+
+        OGRFeature::DestroyFeature(pStartFeature);
+        OGRFeature::DestroyFeature(pEndFeature);
+        OGRFeature::DestroyFeature(pPondFeature);
+        OGRFeature::DestroyFeature(pBratFeature);
     }
 
     pDem = (GDALDataset*) GDALOpen(inDem, GA_ReadOnly);
@@ -159,15 +202,10 @@ int run(const char *inBrat, const char *inDem, const char *outPoints, const char
     double transform[6];
     pDem->GetGeoTransform(transform);
 
-    const char *waterRas = "E:/etal/Projects/NonLoc/Beaver_Modeling/z_crap/waterras.tif";
+    const char *waterRas = "E:/etal/Projects/NonLoc/Beaver_Modeling/z_crap/ponds_lidar.tif";
     const char *waterPts = "E:/etal/Projects/NonLoc/Beaver_Modeling/z_crap/pond_pts.shp";
 
     loadRasterValuesFromPoint(waterRas, waterPts, nRows, nCols, transform);
-
-    OGRFeature::DestroyFeature(pBratFeature);
-    OGRFeature::DestroyFeature(pStartFeature);
-    OGRFeature::DestroyFeature(pEndFeature);
-    OGRFeature::DestroyFeature(pPolygonFeature);
 
     OGRDataSource::DestroyDataSource(pBrat);
     OGRDataSource::DestroyDataSource(pStartPoints);
@@ -271,6 +309,11 @@ int calcCoords(double startX, double startY, double azimuth, double distance, do
     return 0;
 }
 
+int createDamPoints(const char *bratPath, const char *pointPath)
+{
+
+}
+
 int getRasterCol(double transform[6], double xCoord)
 {
     int col;
@@ -345,7 +388,7 @@ int loadRasterValuesFromPoint(const char *rasterPath, const char *pointPath, int
     pPoints = OGRSFDriverRegistrar::Open(pointPath);
     OGRLayer *layer = pPoints->GetLayer(0);
     int nFeatures = layer->GetFeatureCount();
-    qDebug()<<"pond points"<<nFeatures;
+
     QString damElevName = "dam_elev";
     int nDamEl, nDemEl, row, col;
     QString demElevName = "GRID_CODE";
@@ -366,7 +409,6 @@ int loadRasterValuesFromPoint(const char *rasterPath, const char *pointPath, int
             nDemEl = i;
         }
     }
-    qDebug()<< "dam, dem index "<<nDamEl<<nDemEl;
 
     OGRFeature *feature;
 
@@ -386,7 +428,6 @@ int loadRasterValuesFromPoint(const char *rasterPath, const char *pointPath, int
             col = getRasterCol(transform, point->getX());
             row = getRasterRow(transform, point->getY());
             *depth = watDep;
-            qDebug()<<"dam, dem, wat"<<damElev<<demElev<<watDep<<*depth;
 
             pRaster->GetRasterBand(1)->RasterIO(GF_Write, col, row, 1, 1, depth, 1, 1, GDT_Float32, 0,0);
         }
